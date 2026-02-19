@@ -11,7 +11,7 @@ import io
 import shutil
 from flask import Flask, request, jsonify, send_file, render_template_string
 
-from photo_splitter import detect_and_extract_photos, save_photo_to_bytes
+from photo_splitter import detect_and_extract_photos
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100 MB max upload
