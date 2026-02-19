@@ -11,8 +11,8 @@ import gc
 
 MAX_DETECTION_DIM = 2000  # px — working copy for detection
 BG_THRESHOLD      = 235   # pixels brighter than this = scanner background
-VALLEY_RATIO      = 0.05  # column/row must have <5% of max fg-pixels to be a gap
-MIN_GAP_PX        = 5     # gap must be at least this many pixels wide to split
+VALLEY_RATIO      = 0.04  # column/row must have <4% of max fg-pixels to be a gap
+MIN_GAP_PX        = 2     # gap must be at least this many pixels wide to split
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -39,17 +39,21 @@ def detect_and_extract_photos(image_bytes, min_area_ratio=0.02, padding=4):
     total_area     = work_h * work_w
     gray           = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
 
-    # ── 1. Build a foreground mask (non-white pixels = photos) ────────────────
-    _, fg_mask = cv2.threshold(gray, BG_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
+    # ── 1. Two masks with different purposes ─────────────────────────────────
+    _, raw_mask = cv2.threshold(gray, BG_THRESHOLD, 255, cv2.THRESH_BINARY_INV)
 
-    # Close small gaps *within* a single photo without bridging adjacent photos.
-    close_k = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
-    fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_CLOSE, close_k, iterations=2)
-    open_k  = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    fg_mask = cv2.morphologyEx(fg_mask, cv2.MORPH_OPEN,  open_k,  iterations=1)
+    # proj_mask: minimal cleanup only — preserves the thin gaps BETWEEN photos
+    # so projection analysis can find valleys there.
+    denoise_k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    proj_mask = cv2.morphologyEx(raw_mask, cv2.MORPH_OPEN, denoise_k, iterations=1)
 
-    # ── 2. Find coarse blobs ──────────────────────────────────────────────────
-    candidates = _contour_candidates(fg_mask, total_area, min_area_ratio)
+    # blob_mask: aggressively closed — fills white areas INSIDE a photo
+    # (e.g. bright sky) so each photo appears as one solid blob for contour detection.
+    close_k   = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+    blob_mask = cv2.morphologyEx(proj_mask, cv2.MORPH_CLOSE, close_k, iterations=2)
+
+    # ── 2. Find coarse blobs from the closed mask ─────────────────────────────
+    candidates = _contour_candidates(blob_mask, total_area, min_area_ratio)
 
     # Fallback: edge-based if background approach found nothing
     if not candidates:
@@ -68,21 +72,23 @@ def detect_and_extract_photos(image_bytes, min_area_ratio=0.02, padding=4):
         otsu     = cv2.morphologyEx(otsu, cv2.MORPH_OPEN,  k, iterations=1)
         candidates = _contour_candidates(otsu, total_area, min_area_ratio)
 
-    # ── 3. Projection-split blobs that contain multiple touching photos ───────
+    # ── 3. Projection-split on the RAW mask (gaps intact) ────────────────────
+    # proj_mask has no CLOSE applied, so white gaps between touching photos
+    # still appear as near-zero valleys in the column/row projections.
     split = []
     for (x, y, w, h, _) in candidates:
-        split.extend(_project_split(fg_mask, x, y, w, h))
+        split.extend(_project_split(proj_mask, x, y, w, h))
     candidates = [(x, y, w, h, w * h) for (x, y, w, h) in split
                   if w * h >= total_area * min_area_ratio]
 
-    # ── 4. Merge only genuinely overlapping boxes (high threshold) ────────────
+    # ── 4. Merge only genuinely overlapping boxes ─────────────────────────────
     candidates = _merge_overlapping(candidates, overlap_thresh=0.6)
 
     # Sort top-to-bottom, left-to-right
     candidates.sort(key=lambda r: (r[1] // (work_h // 6 or 1), r[0]))
 
-    # ── 5. Refine each box to exact photo edges ───────────────────────────────
-    candidates = [_refine_crop(fg_mask, x, y, w, h) for (x, y, w, h, _) in candidates]
+    # ── 5. Refine each box to exact photo edges (using raw proj_mask) ─────────
+    candidates = [_refine_crop(proj_mask, x, y, w, h) for (x, y, w, h, _) in candidates]
 
     # Scale back to original coordinates
     if scale < 1.0:
@@ -90,7 +96,7 @@ def detect_and_extract_photos(image_bytes, min_area_ratio=0.02, padding=4):
                        int(w / scale), int(h / scale))
                       for (x, y, w, h) in candidates]
 
-    del work, gray, fg_mask
+    del work, gray, raw_mask, proj_mask, blob_mask
     gc.collect()
 
     # ── 6. Extract from full-resolution original ──────────────────────────────
