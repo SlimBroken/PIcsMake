@@ -485,11 +485,13 @@ def split_photos():
         photos = detect_and_extract_photos(image_bytes)
     except Exception as e:
         return jsonify({"error": f"Processing failed: {str(e)}"}), 500
+    finally:
+        del image_bytes  # release upload bytes as soon as processing is done
 
     if len(photos) == 0:
         return jsonify({"error": "No individual photos detected. Try a scan with more contrast between photos and the background."}), 422
 
-    # Save results
+    # Save results — save and release each photo immediately to keep memory low
     job_id = uuid.uuid4().hex[:12]
     job_dir = os.path.join(OUTPUT_DIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
@@ -498,14 +500,17 @@ def split_photos():
     for i, img in enumerate(photos):
         fname = f"photo_{i+1}.{ext}"
         fpath = os.path.join(job_dir, fname)
+        w, h = img.width, img.height
         if output_format == "jpeg":
             img.save(fpath, "JPEG", quality=100, subsampling=0)
         else:
             img.save(fpath, "PNG", optimize=False)
+        img.close()
+        photos[i] = None  # allow GC to reclaim immediately
         photo_info.append({
             "filename": fname,
-            "width": img.width,
-            "height": img.height,
+            "width": w,
+            "height": h,
         })
 
     return jsonify({
