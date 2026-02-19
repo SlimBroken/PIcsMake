@@ -8,6 +8,7 @@ import numpy as np
 from PIL import Image
 import io
 import os
+import gc
 
 
 MAX_DETECTION_DIM = 2000  # Max dimension used for detection (saves memory)
@@ -106,6 +107,10 @@ def detect_and_extract_photos(image_bytes, min_area_ratio=0.02, padding=5):
             for (x, y, w, h, a) in candidates
         ]
 
+    # Free all working arrays before extracting from the (potentially large) original
+    del work, gray, blurred, edges, dilated, contours, kernel
+    gc.collect()
+
     # Extract each photo region from the original high-quality image
     extracted = []
     for (x, y, w, h, _) in candidates:
@@ -121,6 +126,9 @@ def detect_and_extract_photos(image_bytes, min_area_ratio=0.02, padding=5):
         crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
         pil_image = Image.fromarray(crop_rgb)
         extracted.append(pil_image)
+
+    del original, np_arr
+    gc.collect()
 
     return extracted
 
