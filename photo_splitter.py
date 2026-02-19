@@ -10,6 +10,9 @@ import io
 import os
 
 
+MAX_DETECTION_DIM = 2000  # Max dimension used for detection (saves memory)
+
+
 def detect_and_extract_photos(image_bytes, min_area_ratio=0.02, padding=5):
     """
     Detect individual photos in a scanned image and extract them.
@@ -30,10 +33,21 @@ def detect_and_extract_photos(image_bytes, min_area_ratio=0.02, padding=5):
         raise ValueError("Could not decode the uploaded image.")
 
     height, width = original.shape[:2]
-    total_area = height * width
+
+    # Downscale a working copy for detection to reduce memory usage.
+    # Detection only needs to find bounding boxes; we crop from the original.
+    scale = min(1.0, MAX_DETECTION_DIM / max(height, width))
+    if scale < 1.0:
+        work = cv2.resize(original, (int(width * scale), int(height * scale)),
+                          interpolation=cv2.INTER_AREA)
+    else:
+        work = original
+
+    work_h, work_w = work.shape[:2]
+    total_area = work_h * work_w
 
     # Convert to grayscale
-    gray = cv2.cvtColor(original, cv2.COLOR_BGR2GRAY)
+    gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
 
     # Apply Gaussian blur to reduce noise
     blurred = cv2.GaussianBlur(gray, (7, 7), 0)
@@ -82,8 +96,15 @@ def detect_and_extract_photos(image_bytes, min_area_ratio=0.02, padding=5):
     # Merge overlapping rectangles
     candidates = _merge_overlapping(candidates, overlap_thresh=0.3)
 
-    # Sort top-to-bottom, then left-to-right
-    candidates.sort(key=lambda r: (r[1] // (height // 4), r[0]))
+    # Sort top-to-bottom, then left-to-right (using work image coordinates)
+    candidates.sort(key=lambda r: (r[1] // (work_h // 4), r[0]))
+
+    # Scale bounding boxes back to original image coordinates
+    if scale < 1.0:
+        candidates = [
+            (int(x / scale), int(y / scale), int(w / scale), int(h / scale), int(a / (scale * scale)))
+            for (x, y, w, h, a) in candidates
+        ]
 
     # Extract each photo region from the original high-quality image
     extracted = []
