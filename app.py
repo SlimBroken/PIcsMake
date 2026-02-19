@@ -398,6 +398,27 @@ btnRemove.addEventListener('click', () => {
   errorMsg.style.display = 'none';
 });
 
+// ── Resize image client-side before upload (keeps server memory usage low) ──
+const MAX_UPLOAD_DIM = 3500;
+function resizeForUpload(file) {
+  return new Promise(resolve => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const { naturalWidth: w, naturalHeight: h } = img;
+      if (w <= MAX_UPLOAD_DIM && h <= MAX_UPLOAD_DIM) { resolve(file); return; }
+      const scale = MAX_UPLOAD_DIM / Math.max(w, h);
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(w * scale);
+      canvas.height = Math.round(h * scale);
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob(blob => resolve(new File([blob], file.name, { type: 'image/jpeg' })), 'image/jpeg', 0.95);
+    };
+    img.src = url;
+  });
+}
+
 // ── Process ──
 btnProcess.addEventListener('click', async () => {
   if (!currentFile) return;
@@ -407,8 +428,9 @@ btnProcess.addEventListener('click', async () => {
   results.style.display = 'none';
   errorMsg.style.display = 'none';
 
+  const uploadFile = await resizeForUpload(currentFile);
   const formData = new FormData();
-  formData.append('scan', currentFile);
+  formData.append('scan', uploadFile);
   formData.append('format', outputFormat.value);
 
   try {
