@@ -413,7 +413,12 @@ btnProcess.addEventListener('click', async () => {
 
   try {
     const resp = await fetch('/api/split', { method: 'POST', body: formData });
-    const data = await resp.json();
+    let data;
+    try {
+      data = await resp.json();
+    } catch (_) {
+      throw new Error(`Server error (HTTP ${resp.status}). The image may be too large for the free server — try a smaller file.`);
+    }
 
     if (!resp.ok) throw new Error(data.error || 'Processing failed');
 
