@@ -11,13 +11,10 @@ import gc
 
 MAX_DETECTION_DIM = 2000  # px — working copy for detection
 BG_THRESHOLD      = 235   # binary mask: pixels brighter than this = background
-BRIGHT_THRESH     = 218   # intensity mean: columns/rows above this = white gap
-MIN_GAP_PX        = 2     # minimum gap width in pixels
+BRIGHT_THRESH     = 233   # intensity mean: columns/rows above this = white gap
+                          # (slightly below BG_THRESHOLD to catch JPEG-degraded borders)
+MIN_GAP_PX        = 3     # minimum gap width in pixels
 VALLEY_RATIO      = 0.04  # binary projection: gap threshold as fraction of max
-
-SEAM_CENTER       = 0.15  # ignore outer N% of blob when searching for seams
-SEAM_SMOOTH       = 21    # Sobel projection smoothing kernel (wider = better for spread seams)
-SEAM_PEAK_RATIO   = 1.5   # seam peak must be >= this × mean of the projection
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -72,25 +69,17 @@ def detect_and_extract_photos(image_bytes, min_area_ratio=0.02, padding=4):
         otsu    = cv2.morphologyEx(otsu, cv2.MORPH_OPEN,  k, iterations=1)
         candidates = _contour_candidates(otsu, total_area, min_area_ratio)
 
-    # ── 3. Three-pass split ───────────────────────────────────────────────────
+    # ── 3. Gap split ──────────────────────────────────────────────────────────
     #
-    # Pass 1 – gap split: detects white-background gaps between photos.
-    #   Uses both binary mask valleys AND intensity-mean brightness peaks so
-    #   JPEG-degraded white borders (pixel values 215–234) are still caught.
-    #
-    # Pass 2 – seam split: detects boundaries between directly-touching photos.
-    #   Uses Sobel gradient magnitude projection (not Canny) so the energy
-    #   spread over 5-10px at a compressed boundary is fully captured.
-    #   A relative threshold (peak vs column mean) adapts to content type.
-    #
-    # Pass 2 runs on the OUTPUT of pass 1, handling the common 2×2 grid where
-    # one axis has a white gap and the other axis is touching.
+    # Detects white-background gaps between photos using two methods:
+    #   1. Binary mask valleys (proj_mask): exact white pixels → near-zero count
+    #   2. Intensity mean: average column/row brightness > BRIGHT_THRESH
+    #      Catches JPEG-degraded borders whose pixels dip to 215–234.
 
     final = []
     for (x, y, w, h, _) in candidates:
         for (sx, sy, sw, sh) in _gap_split(gray, proj_mask, x, y, w, h):
-            for box in _seam_split(gray, sx, sy, sw, sh, total_area, min_area_ratio):
-                final.append(box + (box[2] * box[3],))
+            final.append((sx, sy, sw, sh, sw * sh))
 
     candidates = [(x, y, w, h, a) for (x, y, w, h, a) in final
                   if a >= total_area * min_area_ratio]
@@ -156,80 +145,6 @@ def _gap_split(gray, proj_mask, x, y, w, h):
             if np.any(region_mask[sy:sy + sh, sx:sx + sw]):
                 results.append((x + sx, y + sy, sw, sh))
     return results or [(x, y, w, h)]
-
-
-def _seam_split(gray, x, y, w, h, total_area, min_area_ratio):
-    """
-    Detect the boundary between directly-touching photos using Sobel gradient.
-
-    Canny thins edges to 1px. A compressed photo boundary spreads over 5-10px,
-    so Canny misses most of it. Sobel keeps the full gradient magnitude across
-    the whole transition, giving a much stronger and wider signal.
-
-    Uses a relative threshold: the peak must be >= SEAM_PEAK_RATIO × mean
-    of the projection, so the detector adapts to the content's gradient level.
-
-    Returns list of (x, y, w, h).
-    """
-    region = gray[y:y + h, x:x + w].astype(np.float32)
-
-    # sobelx detects vertical seams; sobely detects horizontal seams
-    sobelx = np.abs(cv2.Sobel(region, cv2.CV_32F, 1, 0, ksize=3))
-    sobely = np.abs(cv2.Sobel(region, cv2.CV_32F, 0, 1, ksize=3))
-
-    kernel   = np.ones(SEAM_SMOOTH) / SEAM_SMOOTH
-    col_proj = np.convolve(np.sum(sobelx, axis=0), kernel, 'same')
-    row_proj = np.convolve(np.sum(sobely, axis=1), kernel, 'same')
-
-    v_cut = _best_seam(col_proj, w, h, total_area, min_area_ratio)
-    h_cut = _best_seam(row_proj, h, w, total_area, min_area_ratio)
-
-    valid_v = [v_cut] if v_cut is not None else []
-    valid_h = [h_cut] if h_cut is not None else []
-
-    if not valid_v and not valid_h:
-        return [(x, y, w, h)]
-
-    x_segs = _to_segments(valid_v, w)
-    y_segs = _to_segments(valid_h, h)
-
-    results = []
-    for (sy, sh) in y_segs:
-        for (sx, sw) in x_segs:
-            results.append((x + sx, y + sy, sw, sh))
-    return results or [(x, y, w, h)]
-
-
-def _best_seam(proj, total, other_dim, total_area, min_area_ratio):
-    """
-    Find the single best seam position in the center of the projection.
-    Returns the position or None if no convincing seam is found.
-    """
-    lo = int(total * SEAM_CENTER)
-    hi = int(total * (1 - SEAM_CENTER))
-    center = proj[lo:hi]
-    if len(center) == 0:
-        return None
-
-    peak_local = int(np.argmax(center))
-    peak_abs   = lo + peak_local
-    peak_val   = float(proj[peak_abs])
-    mean_val   = float(np.mean(center))
-
-    # Relative: peak must be significantly above the mean
-    if mean_val == 0 or peak_val < mean_val * SEAM_PEAK_RATIO:
-        return None
-
-    # Balance: 20–80% of total
-    if not (0.20 <= peak_abs / total <= 0.80):
-        return None
-
-    # Both halves large enough
-    if (peak_abs * other_dim < total_area * 0.02 or
-            (total - peak_abs) * other_dim < total_area * 0.02):
-        return None
-
-    return peak_abs
 
 
 # ── Low-level helpers ─────────────────────────────────────────────────────────
